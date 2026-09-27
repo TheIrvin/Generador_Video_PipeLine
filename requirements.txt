@@ -4,3 +4,4 @@ python-multipart>=0.0.9,<1
 Pillow>=10.4,<13
 numpy>=1.26,<3
 imageio-ffmpeg>=0.5,<1
+opencv-python-headless>=4.10,<5

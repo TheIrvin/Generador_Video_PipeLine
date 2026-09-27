@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "generador-video-pipeline"
 version = "0.1.0"
-description = "Local API for restrained image-to-video camera and effect animation."
+description = "Local API for motion transfer from a guide video onto a still image."
 requires-python = ">=3.10"
 dependencies = [
   "fastapi>=0.115,<1",
@@ -14,6 +14,7 @@ dependencies = [
   "Pillow>=10.4,<13",
   "numpy>=1.26,<3",
   "imageio-ffmpeg>=0.5,<1",
+  "opencv-python-headless>=4.10,<5",
 ]
 
 [tool.setuptools.packages.find]

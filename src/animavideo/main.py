@@ -22,6 +22,7 @@ from .render import RenderOptions, render_video
 ROOT = Path(os.getenv("VIDEO_PIPELINE_DATA_DIR", "data/jobs")).resolve()
 ROOT.mkdir(parents=True, exist_ok=True)
 MAX_UPLOAD_BYTES = 30 * 1024 * 1024
+MAX_MOTION_REFERENCE_BYTES = 100 * 1024 * 1024
 _job_lock = threading.Lock()
 _render_lock = threading.Lock()
 _active_jobs: set[str] = set()
@@ -74,14 +75,14 @@ def _write_job(job: dict[str, Any]) -> None:
 
 
 def _adjust_prompt(prompt: str) -> str:
-    # The prompt remains part of the job trace. The local renderer uses explicit motion controls.
+    # The prompt remains part of the trace; a supplied guide video drives visible movement.
     return (
         "Use the supplied still as the only visual source and as the opening composition of one continuous shot. "
-        "Preserve the character's identity, face, armor, hands, pose, colors, lighting style, and the existing city background. "
-        "Make a slow camera push toward the character's face, then ease to a steady close framing. "
-        "Animate only the already visible energy vortex: let it rotate and expand smoothly while its magenta and gold light pulses softly. "
-        "Keep the character and other objects still. Do not add, remove, or redesign characters or objects. "
-        "No cuts, scene changes, text, logos, dialogue, or music."
+        "Preserve the character's identity, face, armor, hands, pose, colors, lighting style, and existing city background. "
+        "When a motion reference is supplied, transfer its camera and visible-object movement onto the supplied still "
+        "using optical flow; retain the still's pixels and do not copy new visual details from the guide. "
+        "Do not invent effects, particles, spirals, objects, poses, or scene changes. "
+        "Use a single continuous shot and finish with a steady frame; no text, logos, dialogue, or music."
     )
 
 
@@ -100,7 +101,11 @@ def _run_job(job_id: str) -> None:
                 job["started_at"] = _utc_now()
                 _write_job(job)
                 options = RenderOptions.from_json(json.dumps(job["options"]))
-                metrics = render_video(directory / "input_image", directory / "result.mp4", options)
+                reference_path = directory / "motion_reference.mp4"
+                metrics = render_video(
+                    directory / "input_image", directory / "result.mp4", options,
+                    reference_path if reference_path.exists() else None,
+                )
                 job.update(status="completed", completed_at=_utc_now(), result=metrics)
             except Exception as exc:
                 job.update(status="failed", completed_at=_utc_now(), error=str(exc), traceback=traceback.format_exc()[-4000:])
@@ -122,6 +127,9 @@ async def create_job(
     image: UploadFile = File(..., description="Source still: JPEG, PNG, or WebP"),
     prompt: str = Form(..., description="Original animation prompt; retained for traceability"),
     options: str | None = Form(None, description="Optional RenderOptions JSON object"),
+    motion_reference: UploadFile | None = File(
+        None, description="Optional MP4 guide clip; only its motion is transferred to the source still"
+    ),
     _auth: None = Depends(_authorize),
 ) -> dict[str, Any]:
     if image.filename is None or Path(image.filename).suffix.lower() not in {".jpg", ".jpeg", ".png", ".webp"}:
@@ -139,6 +147,16 @@ async def create_job(
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
+    reference_bytes = None
+    reference_name = None
+    if motion_reference is not None:
+        if motion_reference.filename is None or Path(motion_reference.filename).suffix.lower() != ".mp4":
+            raise HTTPException(status_code=415, detail="motion_reference must be an MP4 file")
+        reference_bytes = await motion_reference.read(MAX_MOTION_REFERENCE_BYTES + 1)
+        if not reference_bytes or len(reference_bytes) > MAX_MOTION_REFERENCE_BYTES:
+            raise HTTPException(status_code=413, detail="motion_reference is empty or exceeds 100 MB")
+        reference_name = Path(motion_reference.filename).name
+
     job_id = uuid.uuid4().hex
     directory = _job_dir(job_id)
     directory.mkdir(parents=True, exist_ok=False)
@@ -147,12 +165,21 @@ async def create_job(
     source_path.write_bytes(image_bytes)
     # Renderer uses a stable internal name independent of the client's original filename.
     source_path.rename(directory / "input_image")
+    reference_metadata = None
+    if reference_bytes is not None:
+        (directory / "motion_reference.mp4").write_bytes(reference_bytes)
+        reference_metadata = {
+            "filename": reference_name,
+            "sha256": hashlib.sha256(reference_bytes).hexdigest(),
+            "bytes": len(reference_bytes),
+        }
     job = {
         "job_id": job_id,
         "status": "queued",
         "created_at": _utc_now(),
         "original_filename": Path(image.filename).name,
         "source_sha256": hashlib.sha256(image_bytes).hexdigest(),
+        "motion_reference": reference_metadata,
         "prompt": prompt,
         "adjusted_animation_prompt": _adjust_prompt(prompt),
         "options": render_options.__dict__,

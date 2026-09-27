@@ -1,8 +1,8 @@
 # Generador Video Pipeline
 
-API local para transformar una imagen fija en un clip vertical con movimiento de cámara y animación ligera de efectos ya visibles. El primer preset replica el ejemplo anime: acercamiento al personaje y vórtice energético magenta/dorado.
+API local para animar una imagen fija. Puede recibir un MP4 opcional como guía y transferir su cámara y movimiento visible mediante flujo óptico, conservando como fuente visual la imagen original.
 
-El motor no regenera al personaje con un modelo de difusión. Aplica transformaciones y composición sobre la imagen de entrada, así que conserva la ilustración y produce un movimiento controlado. Los cambios de pose, acciones nuevas y segmentación automática avanzada quedan fuera de esta primera versión.
+El motor no genera contenido con difusión ni inventa efectos. Cuando recibe `motion_reference`, calcula el movimiento entre fotogramas del video guía y deforma los píxeles de la imagen original para reproducirlo. Es adecuado para movimiento de cámara y desplazamientos visibles como los del ejemplo; no sintetiza partes ocultas ni cambios de pose reales. Sin guía, crea solo el movimiento de cámara configurado.
 
 ## Requisitos
 
@@ -31,19 +31,21 @@ Crear un trabajo con `POST /v1/jobs` como `multipart/form-data`:
 - `image`: archivo JPEG, PNG o WebP.
 - `prompt`: prompt original, conservado en los metadatos para trazabilidad.
 - `options`: objeto JSON opcional con parámetros del render.
+- `motion_reference`: MP4 opcional que aporta el movimiento. No se copian sus detalles visuales, solo se transfiere el movimiento al JPG.
 
 Ejemplo:
 
 ```powershell
 curl.exe -X POST http://127.0.0.1:8000/v1/jobs `
   -F "image=@C:\ruta\referencia.jpg" `
+  -F "motion_reference=@C:\ruta\clip_guia.mp4" `
   -F "prompt=Anima únicamente la imagen de referencia; haz un acercamiento lento y anima el vórtice visible." `
-  -F 'options={"duration_seconds":10,"fps":24,"width":720,"height":1280,"preset":"energy_push_in"}'
+  -F 'options={"duration_seconds":10,"fps":24,"width":720,"height":1280,"preset":"motion_transfer"}'
 ```
 
 La respuesta incluye `job_id`, `status_url` y `video_url`. Consulta `GET /v1/jobs/{job_id}` hasta que `status` sea `completed`, y después descarga el MP4 con `GET /v1/jobs/{job_id}/video`. Los estados posibles son `queued`, `processing`, `completed` y `failed`.
 
-Parámetros disponibles: `duration_seconds`, `fps`, `width`, `height`, `preset`, `zoom_start`, `zoom_end`, `focal_x`, `focal_y`, `hold_seconds`, `animate_energy`, `energy_x`, `energy_y`, `energy_radius`, `energy_turns`, `energy_growth` y `energy_strength`. Las coordenadas focales y del efecto son relativas al ancho/alto, en el rango 0–1. Los valores por omisión están ajustados al JPG del ejemplo.
+Parámetros disponibles: `duration_seconds`, `fps`, `width`, `height`, `preset`, `zoom_start`, `zoom_end`, `focal_x`, `focal_y` y `hold_seconds`. Para movimiento transferido, los fotogramas del MP4 guía se adaptan a la resolución/FPS de salida. Por omisión se produce un MP4 de 10 s, 24 FPS y 720×1280.
 
 La carpeta de trabajos por omisión es `data/jobs`; se puede cambiar con `VIDEO_PIPELINE_DATA_DIR`. Cada trabajo conserva su imagen, `job.json` y el MP4 de salida. El directorio está excluido de Git para evitar publicar los archivos del usuario.
 
@@ -55,4 +57,4 @@ n8n es opcional. Otro flujo puede llamar la API con un nodo HTTP Request, consul
 
 ## Prompt ajustado
 
-El prompt de animación usado como intención de este preset está en `prompts/animation-energy-push-in.txt`. Los parámetros de `options` controlan el render; el texto no invoca un modelo generativo.
+El prompt original y el prompt ajustado quedan en `job.json` para trazabilidad. La plantilla está en `prompts/animation-motion-transfer.txt`; los parámetros de `options` controlan el render y el texto no invoca un modelo generativo.
