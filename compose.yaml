@@ -1,0 +1,12 @@
+services:
+  video-api:
+    build: .
+    ports:
+      - "${VIDEO_PIPELINE_PORT:-8000}:8000"
+    environment:
+      VIDEO_PIPELINE_DATA_DIR: /data/jobs
+      VIDEO_PIPELINE_API_KEY: ${VIDEO_PIPELINE_API_KEY:?Set VIDEO_PIPELINE_API_KEY in .env}
+      VIDEO_PIPELINE_CORS_ORIGINS: ${VIDEO_PIPELINE_CORS_ORIGINS:-}
+    volumes:
+      - ./data/jobs:/data/jobs
+    restart: unless-stopped

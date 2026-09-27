@@ -1,0 +1,185 @@
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import secrets
+import threading
+import traceback
+import uuid
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
+from fastapi.responses import FileResponse
+from PIL import Image, UnidentifiedImageError
+from fastapi.middleware.cors import CORSMiddleware
+
+from .render import RenderOptions, render_video
+
+
+ROOT = Path(os.getenv("VIDEO_PIPELINE_DATA_DIR", "data/jobs")).resolve()
+ROOT.mkdir(parents=True, exist_ok=True)
+MAX_UPLOAD_BYTES = 30 * 1024 * 1024
+_job_lock = threading.Lock()
+_render_lock = threading.Lock()
+_active_jobs: set[str] = set()
+
+app = FastAPI(
+    title="Generador Video Pipeline API",
+    version="0.1.0",
+    description="Submit an image and animation instructions; poll a job and download its MP4.",
+)
+cors_origins = [item.strip() for item in os.getenv("VIDEO_PIPELINE_CORS_ORIGINS", "").split(",") if item.strip()]
+if cors_origins:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=cors_origins,
+        allow_credentials=False,
+        allow_methods=["GET", "POST", "OPTIONS"],
+        allow_headers=["Content-Type", "X-API-Key"],
+    )
+
+
+def _authorize(x_api_key: str | None = Header(default=None)) -> None:
+    configured_key = os.getenv("VIDEO_PIPELINE_API_KEY")
+    if configured_key and not secrets.compare_digest(x_api_key or "", configured_key):
+        raise HTTPException(status_code=401, detail="valid X-API-Key header required")
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _job_dir(job_id: str) -> Path:
+    if not job_id.isalnum() or len(job_id) != 32:
+        raise HTTPException(status_code=404, detail="job not found")
+    return ROOT / job_id
+
+
+def _read_job(job_id: str) -> dict[str, Any]:
+    path = _job_dir(job_id) / "job.json"
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="job not found")
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _write_job(job: dict[str, Any]) -> None:
+    directory = _job_dir(job["job_id"])
+    directory.mkdir(parents=True, exist_ok=True)
+    temp_path = directory / "job.json.tmp"
+    temp_path.write_text(json.dumps(job, ensure_ascii=False, indent=2), encoding="utf-8")
+    temp_path.replace(directory / "job.json")
+
+
+def _adjust_prompt(prompt: str) -> str:
+    # The prompt remains part of the job trace. The local renderer uses explicit motion controls.
+    return (
+        "Use the supplied still as the only visual source and as the opening composition of one continuous shot. "
+        "Preserve the character's identity, face, armor, hands, pose, colors, lighting style, and the existing city background. "
+        "Make a slow camera push toward the character's face, then ease to a steady close framing. "
+        "Animate only the already visible energy vortex: let it rotate and expand smoothly while its magenta and gold light pulses softly. "
+        "Keep the character and other objects still. Do not add, remove, or redesign characters or objects. "
+        "No cuts, scene changes, text, logos, dialogue, or music."
+    )
+
+
+def _run_job(job_id: str) -> None:
+    directory = _job_dir(job_id)
+    with _job_lock:
+        if job_id in _active_jobs:
+            return
+        _active_jobs.add(job_id)
+    try:
+        # Serialize renders to keep memory and integrated-GPU use predictable.
+        with _render_lock:
+            job = _read_job(job_id)
+            try:
+                job["status"] = "processing"
+                job["started_at"] = _utc_now()
+                _write_job(job)
+                options = RenderOptions.from_json(json.dumps(job["options"]))
+                metrics = render_video(directory / "input_image", directory / "result.mp4", options)
+                job.update(status="completed", completed_at=_utc_now(), result=metrics)
+            except Exception as exc:
+                job.update(status="failed", completed_at=_utc_now(), error=str(exc), traceback=traceback.format_exc()[-4000:])
+            finally:
+                _write_job(job)
+    finally:
+        with _job_lock:
+            _active_jobs.discard(job_id)
+
+
+@app.get("/health")
+def health() -> dict[str, str]:
+    return {"status": "ok", "service": "generador-video-pipeline"}
+
+
+@app.post("/v1/jobs", status_code=202)
+async def create_job(
+    background_tasks: BackgroundTasks,
+    image: UploadFile = File(..., description="Source still: JPEG, PNG, or WebP"),
+    prompt: str = Form(..., description="Original animation prompt; retained for traceability"),
+    options: str | None = Form(None, description="Optional RenderOptions JSON object"),
+    _auth: None = Depends(_authorize),
+) -> dict[str, Any]:
+    if image.filename is None or Path(image.filename).suffix.lower() not in {".jpg", ".jpeg", ".png", ".webp"}:
+        raise HTTPException(status_code=415, detail="image must be JPEG, PNG, or WebP")
+    image_bytes = await image.read(MAX_UPLOAD_BYTES + 1)
+    if not image_bytes or len(image_bytes) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="image is empty or exceeds 30 MB")
+    try:
+        with Image.open(image_bytes_to_file(image_bytes)) as decoded:
+            decoded.verify()
+    except (UnidentifiedImageError, OSError):
+        raise HTTPException(status_code=415, detail="uploaded file is not a valid image")
+    try:
+        render_options = RenderOptions.from_json(options)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    job_id = uuid.uuid4().hex
+    directory = _job_dir(job_id)
+    directory.mkdir(parents=True, exist_ok=False)
+    extension = Path(image.filename).suffix.lower()
+    source_path = directory / f"input{extension}"
+    source_path.write_bytes(image_bytes)
+    # Renderer uses a stable internal name independent of the client's original filename.
+    source_path.rename(directory / "input_image")
+    job = {
+        "job_id": job_id,
+        "status": "queued",
+        "created_at": _utc_now(),
+        "original_filename": Path(image.filename).name,
+        "source_sha256": hashlib.sha256(image_bytes).hexdigest(),
+        "prompt": prompt,
+        "adjusted_animation_prompt": _adjust_prompt(prompt),
+        "options": render_options.__dict__,
+        "result": None,
+        "error": None,
+    }
+    _write_job(job)
+    background_tasks.add_task(_run_job, job_id)
+    return {"job_id": job_id, "status": "queued", "status_url": f"/v1/jobs/{job_id}", "video_url": f"/v1/jobs/{job_id}/video"}
+
+
+def image_bytes_to_file(data: bytes):
+    from io import BytesIO
+    return BytesIO(data)
+
+
+@app.get("/v1/jobs/{job_id}")
+def get_job(job_id: str, _auth: None = Depends(_authorize)) -> dict[str, Any]:
+    return _read_job(job_id)
+
+
+@app.get("/v1/jobs/{job_id}/video")
+def get_video(job_id: str, _auth: None = Depends(_authorize)) -> FileResponse:
+    job = _read_job(job_id)
+    if job["status"] != "completed":
+        raise HTTPException(status_code=409, detail=f"job is {job['status']}")
+    path = _job_dir(job_id) / "result.mp4"
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="video result not found")
+    return FileResponse(path, media_type="video/mp4", filename=f"{job_id}.mp4")

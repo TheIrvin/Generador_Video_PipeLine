@@ -1,0 +1,12 @@
+.git
+.idea
+.venv
+__pycache__
+data
+outputs
+*.mp4
+*.jpg
+*.jpeg
+*.png
+*.webp
+.env
