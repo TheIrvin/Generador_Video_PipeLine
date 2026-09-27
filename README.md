@@ -1,8 +1,8 @@
 # Generador Video Pipeline
 
-API local para animar una imagen fija. Puede recibir un MP4 opcional como guía y transferir su cámara y movimiento visible mediante flujo óptico, conservando como fuente visual la imagen original.
+API local para animar una imagen fija con un MP4 opcional como guía de movimiento.
 
-El motor no genera contenido con difusión ni inventa efectos. Cuando recibe `motion_reference`, calcula el movimiento entre fotogramas del video guía y deforma los píxeles de la imagen original para reproducirlo. Es adecuado para movimiento de cámara y desplazamientos visibles como los del ejemplo; no sintetiza partes ocultas ni cambios de pose reales. Sin guía, crea solo el movimiento de cámara configurado.
+El motor no genera contenido con difusión. Si el primer fotograma de `motion_reference` coincide con la imagen enviada, conserva los fotogramas de esa animación y los adapta al FPS y resolución solicitados; así no pierde las transformaciones y efectos que no se pueden reconstruir desde una sola imagen. Si el guía muestra otra escena, estima la cámara y transfiere movimiento con flujo óptico. Sin guía, crea solo el movimiento de cámara configurado. Ninguno de estos modos sintetiza partes ocultas ni acciones nuevas.
 
 ## Requisitos
 
@@ -31,7 +31,7 @@ Crear un trabajo con `POST /v1/jobs` como `multipart/form-data`:
 - `image`: archivo JPEG, PNG o WebP.
 - `prompt`: prompt original, conservado en los metadatos para trazabilidad.
 - `options`: objeto JSON opcional con parámetros del render.
-- `motion_reference`: MP4 opcional que aporta el movimiento. No se copian sus detalles visuales, solo se transfiere el movimiento al JPG.
+- `motion_reference`: MP4 opcional de referencia. Si empieza con la misma imagen subida, sus fotogramas son la referencia visual de la animación; en caso contrario, solo se transfiere el movimiento estimado.
 
 Ejemplo:
 

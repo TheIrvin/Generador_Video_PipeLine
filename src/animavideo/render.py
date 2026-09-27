@@ -4,6 +4,7 @@ import json
 import subprocess
 import time
 from dataclasses import asdict, dataclass
+from itertools import chain
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -130,7 +131,7 @@ def _iter_video_frames(path: Path, options: RenderOptions, total_frames: int) ->
 
 def _iter_motion_warp_frames(source: Image.Image, guide_frames: Iterator[np.ndarray],
                              options: RenderOptions) -> Iterator[np.ndarray]:
-    """Transfer guide motion as dense optical flow while retaining source-image pixels."""
+    """Transfer the guide's camera path plus residual local movement onto the still."""
     try:
         import cv2
     except ImportError as exc:
@@ -146,26 +147,92 @@ def _iter_motion_warp_frames(source: Image.Image, guide_frames: Iterator[np.ndar
         raise ValueError("motion_reference contains no decodable video frames") from exc
     base_guide = cv2.resize(first_guide, small_size, interpolation=cv2.INTER_AREA)
     base_gray = cv2.cvtColor(base_guide, cv2.COLOR_RGB2GRAY)
+    sift = cv2.SIFT_create(nfeatures=1800, contrastThreshold=0.025)
+    base_keypoints, base_descriptors = sift.detectAndCompute(base_gray, None)
+    matcher = cv2.BFMatcher(cv2.NORM_L2)
     grid_x, grid_y = np.meshgrid(np.arange(width, dtype=np.float32), np.arange(height, dtype=np.float32))
     yield original
+    last_homography = np.eye(3, dtype=np.float64)
     for guide in guide_frames:
         small = cv2.resize(guide, small_size, interpolation=cv2.INTER_AREA)
         gray = cv2.cvtColor(small, cv2.COLOR_RGB2GRAY)
-        # Backward flow maps each target pixel to its matching coordinate in the first guide frame.
+        keypoints, descriptors = sift.detectAndCompute(gray, None)
+
+        # Fit the camera transform from stable scene points. The mapping is current -> first frame.
+        homography = None
+        if descriptors is not None and base_descriptors is not None and len(descriptors) >= 8:
+            pairs = matcher.knnMatch(descriptors, base_descriptors, k=2)
+            good = [first for first, second in pairs if first.distance < 0.72 * second.distance]
+            if len(good) >= 12:
+                current_points = np.float32([keypoints[m.queryIdx].pt for m in good]).reshape(-1, 1, 2)
+                base_points = np.float32([base_keypoints[m.trainIdx].pt for m in good]).reshape(-1, 1, 2)
+                candidate, inliers = cv2.findHomography(current_points, base_points, cv2.RANSAC, 2.5)
+                if candidate is not None and inliers is not None:
+                    inlier_count = int(inliers.sum())
+                    scale_estimate = float(np.sqrt(abs(np.linalg.det(candidate[:2, :2]))))
+                    if inlier_count >= 18 and inlier_count / len(good) >= 0.20 and 0.35 <= scale_estimate <= 2.5:
+                        homography = candidate / candidate[2, 2]
+
+        if homography is not None:
+            # Light temporal smoothing damps feature-match jitter without losing the camera push.
+            homography = 0.25 * last_homography + 0.75 * homography
+            homography /= homography[2, 2]
+            last_homography = homography
+        else:
+            homography = last_homography
+
+        # Homographies were estimated at half resolution; convert them to output coordinates.
+        scale_matrix = np.diag([width / small_size[0], height / small_size[1], 1.0])
+        full_homography = scale_matrix @ homography @ np.linalg.inv(scale_matrix)
+        # Map output pixels back through camera motion, then add localized residual movement.
+        denominator = (full_homography[2, 0] * grid_x + full_homography[2, 1] * grid_y
+                       + full_homography[2, 2])
+        camera_x = (full_homography[0, 0] * grid_x + full_homography[0, 1] * grid_y
+                    + full_homography[0, 2]) / denominator
+        camera_y = (full_homography[1, 0] * grid_x + full_homography[1, 1] * grid_y
+                    + full_homography[1, 2]) / denominator
+        camera_x = camera_x.astype(np.float32)
+        camera_y = camera_y.astype(np.float32)
+
+        aligned_guide = cv2.warpPerspective(
+            guide, full_homography, (width, height), flags=cv2.INTER_LINEAR,
+            borderMode=cv2.BORDER_REPLICATE,
+        )
+        aligned_small = cv2.resize(aligned_guide, small_size, interpolation=cv2.INTER_AREA)
+        aligned_gray = cv2.cvtColor(aligned_small, cv2.COLOR_RGB2GRAY)
+        # Once global camera motion is removed, dense flow captures movement in unrelated guides.
         flow = cv2.calcOpticalFlowFarneback(
-            gray, base_gray, None, pyr_scale=0.5, levels=3, winsize=21,
+            aligned_gray, base_gray, None, pyr_scale=0.5, levels=3, winsize=21,
             iterations=3, poly_n=7, poly_sigma=1.5, flags=0,
         )
         flow = cv2.resize(flow, (width, height), interpolation=cv2.INTER_LINEAR)
         flow[..., 0] *= width / small_size[0]
         flow[..., 1] *= height / small_size[1]
-        # Damp noisy local vectors slightly; preserve camera and large object movement.
+        flow *= 1.45
         flow = cv2.GaussianBlur(flow, (0, 0), sigmaX=1.2, sigmaY=1.2)
-        map_x = grid_x + flow[..., 0]
-        map_y = grid_y + flow[..., 1]
+        residual_x = cv2.remap(flow[..., 0], camera_x, camera_y, cv2.INTER_LINEAR,
+                               borderMode=cv2.BORDER_REPLICATE)
+        residual_y = cv2.remap(flow[..., 1], camera_x, camera_y, cv2.INTER_LINEAR,
+                               borderMode=cv2.BORDER_REPLICATE)
+        map_x = camera_x + residual_x
+        map_y = camera_y + residual_y
         frame = cv2.remap(original, map_x, map_y, interpolation=cv2.INTER_CUBIC,
                           borderMode=cv2.BORDER_REPLICATE)
         yield frame
+
+
+def _guide_starts_from_source(source: Image.Image, first_guide: np.ndarray,
+                              options: RenderOptions) -> bool:
+    """Detect whether a guide begins from the exact uploaded still."""
+    import cv2
+
+    source_rgb = np.asarray(source, dtype=np.uint8)
+    size = (max(64, round(options.width * 0.5)), max(64, round(options.height * 0.5)))
+    source_gray = cv2.cvtColor(cv2.resize(source_rgb, size, interpolation=cv2.INTER_AREA), cv2.COLOR_RGB2GRAY)
+    guide_gray = cv2.cvtColor(cv2.resize(first_guide, size, interpolation=cv2.INTER_AREA), cv2.COLOR_RGB2GRAY)
+    similarity = float(np.corrcoef(source_gray.ravel(), guide_gray.ravel())[0, 1])
+    mae = float(cv2.absdiff(source_gray, guide_gray).mean())
+    return similarity >= 0.88 and mae <= 24
 
 
 def render_video(image_path: Path, output_path: Path, options: RenderOptions,
@@ -179,9 +246,21 @@ def render_video(image_path: Path, output_path: Path, options: RenderOptions,
         source = ImageOps.exif_transpose(source).convert("RGB")
         source = ImageOps.fit(source, (options.width, options.height), method=Image.Resampling.LANCZOS)
     frames: Iterator[np.ndarray]
+    motion_reference_mode = "none"
     if motion_reference_path:
         guide = _iter_video_frames(motion_reference_path, options, total_frames)
-        frames = _iter_motion_warp_frames(source, guide, options)
+        try:
+            first_guide = next(guide)
+        except StopIteration as exc:
+            raise ValueError("motion_reference contains no decodable video frames") from exc
+        guide = chain((first_guide,), guide)
+        if _guide_starts_from_source(source, first_guide, options):
+            # This is already the requested animation for the uploaded still; preserve its exact motion.
+            frames = guide
+            motion_reference_mode = "same_image_reference"
+        else:
+            frames = _iter_motion_warp_frames(source, guide, options)
+            motion_reference_mode = "optical_flow_transfer"
     else:
         frames = (np.asarray(_frame_at(source, index, total_frames, options), dtype=np.uint8)
                   for index in range(total_frames))
@@ -217,5 +296,6 @@ def render_video(image_path: Path, output_path: Path, options: RenderOptions,
         "height": options.height,
         "render_seconds": round(time.perf_counter() - started, 2),
         "motion_reference_used": motion_reference_path is not None,
+        "motion_reference_mode": motion_reference_mode,
         "options": asdict(options),
     }

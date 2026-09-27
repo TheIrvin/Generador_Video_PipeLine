@@ -79,8 +79,9 @@ def _adjust_prompt(prompt: str) -> str:
     return (
         "Use the supplied still as the only visual source and as the opening composition of one continuous shot. "
         "Preserve the character's identity, face, armor, hands, pose, colors, lighting style, and existing city background. "
-        "When a motion reference is supplied, transfer its camera and visible-object movement onto the supplied still "
-        "using optical flow; retain the still's pixels and do not copy new visual details from the guide. "
+        "When a motion reference starts from this same still, preserve its frame-by-frame animation and adapt it "
+        "to the requested output settings. For a different guide, transfer its camera and visible-object movement "
+        "onto the still using optical flow. "
         "Do not invent effects, particles, spirals, objects, poses, or scene changes. "
         "Use a single continuous shot and finish with a steady frame; no text, logos, dialogue, or music."
     )
