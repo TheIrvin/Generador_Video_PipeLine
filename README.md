@@ -51,6 +51,18 @@ La carpeta de trabajos por omisión es `data/jobs`; se puede cambiar con `VIDEO_
 
 Los renders se procesan de uno en uno. Para integraciones desde un navegador, configura `VIDEO_PIPELINE_CORS_ORIGINS` con los orígenes permitidos separados por coma. Si el servicio será accesible fuera del equipo local, define `VIDEO_PIPELINE_API_KEY`; el cliente debe enviarla como `X-API-Key`. El servidor arranca enlazado a `127.0.0.1`; expón otro host solo detrás de una red y reglas de acceso que controles.
 
+## Pruebas
+
+Instala las dependencias de desarrollo y ejecuta las pruebas sin iniciar un render real:
+
+```powershell
+python -m pip install -e ".[test]"
+python -m pytest
+ruff check src tests
+```
+
+GitHub Actions ejecuta esas comprobaciones en Python 3.10, 3.12 y 3.14.
+
 ## n8n
 
 n8n es opcional. Otro flujo puede llamar la API con un nodo HTTP Request, consultar el estado y descargar el resultado. Mantener el motor como servicio HTTP evita acoplarlo al shell de n8n y permite llamarlo desde otros sistemas. Si n8n corre en Docker, debe poder alcanzar el host/API y las rutas compartidas solo son necesarias si el cliente envía archivos por ruta en vez de subirlos al endpoint.

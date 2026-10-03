@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import json
+import math
 import subprocess
 import time
+from collections.abc import Iterator
 from dataclasses import asdict, dataclass
 from itertools import chain
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 import imageio_ffmpeg
 import numpy as np
@@ -27,7 +29,7 @@ class RenderOptions:
     hold_seconds: float = 0.5
 
     @classmethod
-    def from_json(cls, value: str | None) -> "RenderOptions":
+    def from_json(cls, value: str | None) -> RenderOptions:
         if not value:
             return cls()
         try:
@@ -48,6 +50,27 @@ class RenderOptions:
         return result
 
     def validate(self) -> None:
+        numeric_options = {
+            "duration_seconds": self.duration_seconds,
+            "zoom_start": self.zoom_start,
+            "zoom_end": self.zoom_end,
+            "focal_x": self.focal_x,
+            "focal_y": self.focal_y,
+            "hold_seconds": self.hold_seconds,
+        }
+        for name, value in numeric_options.items():
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ValueError(f"{name} must be a number")
+            if isinstance(value, float) and not math.isfinite(value):
+                raise ValueError(f"{name} must be finite")
+
+        integer_options = {"fps": self.fps, "width": self.width, "height": self.height}
+        for name, value in integer_options.items():
+            if type(value) is not int:
+                raise ValueError(f"{name} must be an integer")
+        if not isinstance(self.preset, str):
+            raise ValueError("preset must be a string")
+
         if not 1 <= self.duration_seconds <= 30:
             raise ValueError("duration_seconds must be between 1 and 30")
         if not 1 <= self.fps <= 60:
@@ -56,10 +79,14 @@ class RenderOptions:
             raise ValueError("width and height must be between 64 and 1920")
         if self.width % 2 or self.height % 2:
             raise ValueError("width and height must be even for H.264 output")
-        if not (1 <= self.zoom_start <= 4 and 1 <= self.zoom_end <= 4):
-            raise ValueError("zoom values must be between 1 and 4")
-        if not (0 <= self.focal_x <= 1 and 0 <= self.focal_y <= 1):
-            raise ValueError("focal_x and focal_y must be normalized from 0 to 1")
+        if not 1 <= self.zoom_start <= 4:
+            raise ValueError("zoom_start must be between 1 and 4")
+        if not 1 <= self.zoom_end <= 4:
+            raise ValueError("zoom_end must be between 1 and 4")
+        if not 0 <= self.focal_x <= 1:
+            raise ValueError("focal_x must be normalized from 0 to 1")
+        if not 0 <= self.focal_y <= 1:
+            raise ValueError("focal_y must be normalized from 0 to 1")
         if not (0 <= self.hold_seconds < self.duration_seconds):
             raise ValueError("hold_seconds must be >= 0 and less than duration_seconds")
 
