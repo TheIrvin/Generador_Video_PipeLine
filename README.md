@@ -70,3 +70,7 @@ n8n es opcional. Otro flujo puede llamar la API con un nodo HTTP Request, consul
 ## Prompt ajustado
 
 El prompt original y el prompt ajustado quedan en `job.json` para trazabilidad. La plantilla está en `prompts/animation-motion-transfer.txt`; los parámetros de `options` controlan el render y el texto no invoca un modelo generativo.
+
+## Licencia
+
+Este proyecto está bajo la licencia MIT. Consulta [LICENSE](LICENSE).
