@@ -12,12 +12,11 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from PIL import Image, UnidentifiedImageError
-from fastapi.middleware.cors import CORSMiddleware
 
 from .render import RenderOptions, render_video
-
 
 ROOT = Path(os.getenv("VIDEO_PIPELINE_DATA_DIR", "data/jobs")).resolve()
 ROOT.mkdir(parents=True, exist_ok=True)
@@ -142,7 +141,7 @@ async def create_job(
         with Image.open(image_bytes_to_file(image_bytes)) as decoded:
             decoded.verify()
     except (UnidentifiedImageError, OSError):
-        raise HTTPException(status_code=415, detail="uploaded file is not a valid image")
+        raise HTTPException(status_code=415, detail="uploaded file is not a valid image") from None
     try:
         render_options = RenderOptions.from_json(options)
     except ValueError as exc:
