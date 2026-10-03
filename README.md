@@ -49,6 +49,8 @@ Parámetros disponibles: `duration_seconds`, `fps`, `width`, `height`, `preset`,
 
 La carpeta de trabajos por omisión es `data/jobs`; se puede cambiar con `VIDEO_PIPELINE_DATA_DIR`. Cada trabajo conserva su imagen, `job.json` y el MP4 de salida. El directorio está excluido de Git para evitar publicar los archivos del usuario.
 
+Al iniciar, el servicio marca como `failed` los trabajos que quedaron en `queued` o `processing` por una interrupción. Los trabajos terminados conservan su estado y resultados; los trabajos interrumpidos incluyen un mensaje que permite distinguirlos de un error del render.
+
 Los renders se procesan de uno en uno. Para integraciones desde un navegador, configura `VIDEO_PIPELINE_CORS_ORIGINS` con los orígenes permitidos separados por coma. Si el servicio será accesible fuera del equipo local, define `VIDEO_PIPELINE_API_KEY`; el cliente debe enviarla como `X-API-Key`. El servidor arranca enlazado a `127.0.0.1`; expón otro host solo detrás de una red y reglas de acceso que controles.
 
 ## Pruebas

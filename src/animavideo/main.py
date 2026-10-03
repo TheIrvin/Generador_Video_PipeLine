@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import secrets
 import threading
 import traceback
 import uuid
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -25,11 +27,70 @@ MAX_MOTION_REFERENCE_BYTES = 100 * 1024 * 1024
 _job_lock = threading.Lock()
 _render_lock = threading.Lock()
 _active_jobs: set[str] = set()
+_logger = logging.getLogger(__name__)
+
+
+def _recover_interrupted_jobs() -> int:
+    """Mark persisted jobs that cannot resume after a process restart as failed."""
+    recovered = 0
+    try:
+        directories = list(ROOT.iterdir())
+    except OSError:
+        _logger.exception("Could not inspect the persisted job directory %s", ROOT)
+        return recovered
+
+    for directory in directories:
+        if not directory.is_dir() or directory.is_symlink():
+            continue
+
+        job_path = directory / "job.json"
+        if not job_path.is_file():
+            continue
+
+        try:
+            job = json.loads(job_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            _logger.warning("Skipping unreadable job metadata at %s", job_path, exc_info=True)
+            continue
+
+        if (
+            not isinstance(job, dict)
+            or job.get("job_id") != directory.name
+            or not directory.name.isalnum()
+            or len(directory.name) != 32
+        ):
+            continue
+        status = job.get("status")
+        if not isinstance(status, str) or status not in {"queued", "processing"}:
+            continue
+
+        job.update(
+            status="failed",
+            completed_at=_utc_now(),
+            error="Job was interrupted by a service restart before processing completed.",
+        )
+        try:
+            _write_job(job)
+        except OSError:
+            _logger.exception("Could not mark interrupted job %s as failed", directory.name)
+            continue
+        recovered += 1
+
+    return recovered
+
+
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    recovered = _recover_interrupted_jobs()
+    if recovered:
+        _logger.info("Marked %d interrupted job(s) as failed", recovered)
+    yield
 
 app = FastAPI(
     title="Generador Video Pipeline API",
     version="0.1.0",
     description="Submit an image and animation instructions; poll a job and download its MP4.",
+    lifespan=_lifespan,
 )
 cors_origins = [item.strip() for item in os.getenv("VIDEO_PIPELINE_CORS_ORIGINS", "").split(",") if item.strip()]
 if cors_origins:
